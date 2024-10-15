@@ -22,7 +22,6 @@ erc721_portal_address = "0x237F8DD094C0e47f4236f12b4Fa01d6Dae89fb87"
 wallet = Wallet
 battle_manager = BattleManager(wallet)
 
-
 def encode(d):
     return "0x" + json.dumps(d).encode("utf-8").hex()
 
@@ -76,6 +75,11 @@ def handle_advance(data):
         if req_json["method"] == "create_challenge":
             converted_value = int(req_json["amount"]) if isinstance(req_json["amount"], str) and req_json["amount"].isdigit() else req_json["amount"]
             payload = battle_manager.create_challenge(msg_sender.lower(), req_json["fighter_hash"], req_json["token"].lower(), converted_value)
+            response = requests.post(rollup_server + "/notice", json={"payload": str_to_hex(json.dumps(payload))})
+
+        if req_json["method"] == "create_challenge_eth":
+            converted_value = int(req_json["amount"]) if isinstance(req_json["amount"], str) and req_json["amount"].isdigit() else req_json["amount"]
+            payload = battle_manager.create_challenge_eth(msg_sender.lower(), req_json["fighter_hash"], converted_value)
             response = requests.post(rollup_server + "/notice", json={"payload": str_to_hex(json.dumps(payload))})
 
         if req_json["method"] == "accept_challenge":

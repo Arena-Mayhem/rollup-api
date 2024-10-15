@@ -39,6 +39,29 @@ class BattleManager:
             'fighter_hash': fighter_hash,
             'token': token,
             'amount': str(amount),
+            'status': 'pending', # possible statuses: pending, accepted
+            'opponent': None
+        }
+
+        return self.challenges[challenge_id]
+
+    def create_challenge_eth(self, owner_id, fighter_hash, amount):
+        balance = self.wallet.balance_get(owner_id)
+        token_balance = balance.ether_get()
+        if int(token_balance) < 2 * amount:
+            raise Exception("User does not have enough balance to propose such a duel")
+
+        self.wallet.ether_transfer(owner_id, "0x0", amount) ## How much the user is betting
+        self.wallet.ether_transfer(owner_id, "0x0", amount) ## The staking as colateral
+
+        # Creates a new challenge
+        challenge_id = self._generate_match_id()
+        self.challenges[challenge_id] = {
+            'id': challenge_id,
+            'owner': owner_id,
+            'fighter_hash': fighter_hash,
+            'token': None,
+            'amount': str(amount),
             'status': 'pending',  # possible statuses: pending, accepted
             'opponent': None
         }
@@ -55,8 +78,12 @@ class BattleManager:
             raise Exception("Challenge is not available for acceptance.")
 
         balance = self.wallet.balance_get(opponent_id)
-        token_balance = balance.erc20_get(challenge['token'])
-        if token_balance < int(challenge['amount']):
+        token_balance = balance.ether_get()
+
+        if challenge['token'] is not None:
+            token_balance = balance.erc20_get(challenge['token'])
+
+        if int(challenge['amount']) > int(token_balance):
             raise Exception("User does not have enough balance to propose such a duel")
 
         d = fighter
@@ -64,7 +91,11 @@ class BattleManager:
         if char2.is_cheater():
             raise Exception("Invalid fighter data")
 
-        self.wallet.erc20_transfer(opponent_id, "0x0", challenge['token'], int(challenge['amount'])) ## How much the user is betting
+        if challenge['token'] is None:
+            self.wallet.ether_transfer(opponent_id, "0x0", int(challenge['amount']))
+        else:
+            self.wallet.erc20_transfer(opponent_id, "0x0", challenge['token'], int(challenge['amount']))
+        ## Transfer the stake of openent's token
 
         challenge['status'] = 'accepted'
         challenge['opponent'] = opponent_id
@@ -83,38 +114,60 @@ class BattleManager:
         if sender_id != challenge['owner']:
             raise Exception("You are not the owner, can't start match.")
 
+        is_eth_challenge = challenge['token'] is None
         d = fighter
         char1 = arena.Character(0, d["name"], d["weapon"], d["hp"], d["atk"], d["def"], d["spd"])
+
         d = challenge['opponent_fighter']
         char2 = arena.Character(1, d["name"], d["weapon"], d["hp"], d["atk"], d["def"], d["spd"])
 
         opponent_id = challenge['opponent']
         token = challenge['token']
         amount = int(challenge['amount'])
+
         if (char1.is_cheater() or not self._hash_matches_fighter(fighter, challenge['fighter_hash'])):
             ## ends duel and player 2 gets everything, even the stake
             self.challenges.pop(challenge_id)
-            self.wallet.erc20_transfer("0x0", opponent_id, token, amount) # their money
-            self.wallet.erc20_transfer("0x0", opponent_id, token, amount) # owner money
-            self.wallet.erc20_transfer("0x0", opponent_id, token, amount) # owner stake
+            if is_eth_challenge:
+                self.wallet.ether_transfer("0x0", opponent_id, amount) # their money
+                self.wallet.ether_transfer("0x0", opponent_id, amount) # owner money
+                self.wallet.ether_transfer("0x0", opponent_id, amount) # owner stake
+            else:
+                self.wallet.erc20_transfer("0x0", opponent_id, token, amount) # their money
+                self.wallet.erc20_transfer("0x0", opponent_id, token, amount) # owner money
+                self.wallet.erc20_transfer("0x0", opponent_id, token, amount) # owner stake
             return
 
-
-        self.wallet.erc20_transfer("0x0", sender_id, token, amount) # game creator gets it's stake back
+        if is_eth_challenge:
+            self.wallet.ether_transfer("0x0", sender_id, amount)
+        else:
+            self.wallet.erc20_transfer("0x0", sender_id, token, amount) # game creator gets it's stake back
 
         result, log = arena.battle(char1, char2)
         self.challenges.pop(challenge_id) # delete fight
 
         if result["winner"]["id"] == -1: # and everyone gets their money back
-            self.wallet.erc20_transfer("0x0", opponent_id, token, amount)
-            self.wallet.erc20_transfer("0x0", sender_id, token, amount)
+            if is_eth_challenge:
+                self.wallet.ether_transfer("0x0", opponent_id, amount)
+                self.wallet.ether_transfer("0x0", sender_id, amount)
+            else:
+                self.wallet.erc20_transfer("0x0", opponent_id, token, amount)
+                self.wallet.erc20_transfer("0x0", sender_id, token, amount)
             return
         elif result["winner"]["id"] == 0: # game creator wins
-            self.wallet.erc20_transfer("0x0", sender_id, token, amount)
-            self.wallet.erc20_transfer("0x0", sender_id, token, amount)
+            if is_eth_challenge:
+                self.wallet.ether_transfer("0x0", sender_id, amount)
+                self.wallet.ether_transfer("0x0", sender_id, amount)
+            else:
+                self.wallet.erc20_transfer("0x0", sender_id, token, amount)
+                self.wallet.erc20_transfer("0x0", sender_id, token, amount)
         else: # opponent wins
-            self.wallet.erc20_transfer("0x0", opponent_id, token, amount)
-            self.wallet.erc20_transfer("0x0", opponent_id, token, amount)
+            if is_eth_challenge:
+                self.wallet.ether_transfer("0x0", opponent_id, amount)
+                self.wallet.ether_transfer("0x0", opponent_id, amount)
+            else:
+                self.wallet.erc20_transfer("0x0", opponent_id, token, amount)
+                self.wallet.erc20_transfer("0x0", opponent_id, token, amount)
 
         notice_payload = result
         notice_payload['owner_id'] = sender_id
@@ -141,7 +194,7 @@ class BattleManager:
     def _hash_matches_fighter(self, fighter, hash):
         d = fighter
         input_string = "-".join([d["name"], d["weapon"], str(d["hp"]), str(d["atk"]), str(d["def"]), str(d["spd"])])
-        prove = hashlib.sha256(input_string.encode()).hexdigest()
+        prove = "0x" + hashlib.sha256(input_string.encode()).hexdigest()
         if hash != prove:
             return False
         return True
